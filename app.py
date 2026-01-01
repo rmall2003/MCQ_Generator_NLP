@@ -7,16 +7,17 @@ from QA_gen.distractors import generate_distractors_for_answer
 import pandas as pd
 import io
 import re
-
 import logging
 import os
+
+# Disable Unnecessary Logging (suppress warnings from Hugging Face and SentenceTransformer)
 os.environ["WANDB_DISABLED"] = "true"
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
 
 @st.cache_resource
-def load_models(model_name="t5-small"):
+def load_models(model_name="google/flan-t5-base"):
     """
     Load required models.
     Returns dict of models or raises a friendly exception.
@@ -71,20 +72,93 @@ def assign_difficulty(question, answer, context, is_fallback):
 
 st.set_page_config(page_title="QA & MCQ Generator", layout="wide")
 
-st.title("QA & MCQ Generator")
-st.markdown("Upload a text/docx/pdf/csv and generate MCQs.")
+# Custom CSS for a dark theme
+st.markdown("""
+    <style>
+        .main { padding-top: 2rem; }
+        .stApp { background-color: #0f172a; }
+        h1 { color: #f1f5f9; font-weight: 600; margin-bottom: 0.5rem; }
+        .subtitle { color: #94a3b8; font-size: 1.1rem; margin-bottom: 2rem; }
+        .control-section { 
+            background: #1e293b; 
+            padding: 1.5rem; 
+            border-radius: 10px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            margin-bottom: 2rem;
+            border: 1px solid #334155;
+        }
+        .stButton>button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 0.5rem 2rem;
+            font-weight: 500;
+            border-radius: 6px;
+            transition: transform 0.2s;
+        }
+        .stButton>button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.6);
+        }
+        .stDownloadButton>button {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border: none;
+            padding: 0.5rem 2rem;
+            font-weight: 500;
+            border-radius: 6px;
+        }
+        .mcq-card {
+            background: #1e293b;
+            padding: 1.5rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            margin-bottom: 1.5rem;
+            border-left: 4px solid #667eea;
+            border: 1px solid #334155;
+        }
+        .difficulty-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-left: 0.5rem;
+        }
+        .difficulty-easy { background-color: #064e3b; color: #6ee7b7; }
+        .difficulty-medium { background-color: #78350f; color: #fcd34d; }
+        .difficulty-hard { background-color: #7f1d1d; color: #fca5a5; }
+        
+        /* Dark theme adjustments for Streamlit components */
+        .stRadio > label { color: #e2e8f0 !important; }
+        .stExpander { background-color: #1e293b; border: 1px solid #334155; }
+        [data-testid="stExpander"] { background-color: #1e293b; }
+        .stMarkdown { color: #e2e8f0; }
+    </style>
+""", unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("Upload file (txt/docx/pdf/csv)", type=["txt","docx","pdf","csv"])
+st.title("🎓 QA & MCQ Generator")
+st.markdown('<p class="subtitle">Upload your document and generate intelligent multiple-choice questions</p>', unsafe_allow_html=True)
 
-skip_pages = st.checkbox("For PDFs, skip first and last page (to avoid cover/reference pages)", value=True)
+# Control section with cleaner layout
+st.markdown('<div class="control-section">', unsafe_allow_html=True)
+col1, col2 = st.columns([2, 1])
 
-num_questions = st.slider("Max questions to generate", 1, 40, 10)
-use_keybert = st.checkbox("Use KeyBERT for keywords (better seeds)", value=True)
+with col1:
+    uploaded_file = st.file_uploader("📁 Upload your document", type=["txt","docx","pdf","csv"], help="Supports text, Word, PDF, and CSV files")
 
-allowed_models = ["t5-small", "t5-base", "google/flan-t5-small"]
-model_size = st.selectbox("QG model (FLAN is best)", allowed_models, index=2) 
+with col2:
+    num_questions = st.slider("Number of questions", 1, 40, 10, help="Maximum questions to generate")
 
-st.warning("For best results, use the **google/flan-t5-small** model and check the **KeyBERT** box.")
+col3, col4 = st.columns(2)
+with col3:
+    use_keybert = st.checkbox("✨ Use KeyBERT for better keywords", value=True, help="Improves question quality by extracting key phrases")
+with col4:
+    skip_pages = st.checkbox("📄 Skip first & last PDF pages", value=True, help="Useful to avoid cover and reference pages")
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+model_size = "google/flan-t5-base"
 
 
 if "mcq_list" not in st.session_state:
@@ -111,37 +185,104 @@ def fallback_cloze_question(sentence: str, answer: str) -> str:
         short = (answer[:80] + "...") if len(answer) > 80 else answer
         return f"What is {short}?"
 
+def clean_question(q_text: str, answer: str) -> str:
+    """
+    Post-process and validate generated questions for quality.
+    Returns empty string if question is invalid.
+    """
+    if not q_text:
+        return ""
+    
+    q_text = q_text.strip()
+    
+    # Remove answer from question if present (case-insensitive check)
+    ans_lower = answer.lower()
+    if ans_lower in q_text.lower():
+        return ""
+    
+    # Remove common prefixes
+    prefixes = ["question:", "q:", "answer:", "a:"]
+    for prefix in prefixes:
+        if q_text.lower().startswith(prefix):
+            q_text = q_text[len(prefix):].strip()
+    
+    # Ensure it ends with a question mark
+    if q_text and not q_text.endswith('?'):
+        q_text += '?'
+    
+    # Capitalize first letter
+    if q_text and len(q_text) > 0:
+        q_text = q_text[0].upper() + q_text[1:]
+    
+    # Validate minimum length and content
+    if len(q_text) < 10:
+        return ""
+    
+    # Check if it has actual words (not just symbols)
+    if not re.search(r'[a-zA-Z]{3,}', q_text):
+        return ""
+    
+    # Avoid questions that are just "What is X?" where X is too short
+    if re.match(r'^What is .{1,15}\?$', q_text, re.IGNORECASE):
+        return ""
+    
+    return q_text
+
 if uploaded_file:
-    with st.spinner("Extracting text..."):
+    with st.spinner("📖 Extracting text from your document..."):
         raw_text = extract_text_from_file(uploaded_file, skip_cover_pages=skip_pages)
-    st.success("Text extracted")
+    st.success("✅ Text extracted successfully!")
 
     st.session_state["_last_uploaded_name"] = uploaded_file.name
 
-    if st.checkbox("Show preview of uploaded text (first 1000 chars)"):
-        st.write("Preview (first 1000 chars):")
-        st.code(raw_text[:1000])
+    with st.expander("👁️ Preview extracted text (first 1000 characters)"):
+        st.code(raw_text[:1000], language="text")
 
-    if st.button("Prepare & Generate"):
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    if st.button("🚀 Generate MCQs", use_container_width=True):
         st.session_state.mcq_list = []
         st.session_state.mcq_submitted = {}
 
-        with st.spinner("Preparing document and selecting answer candidates..."):
+        with st.spinner("🔍 Preparing document and selecting answer candidates..."):
             sentences = split_sentences(raw_text)
             sentences = [s for i,s in enumerate(sentences) if s and len(s.split()) >= 4]
             sentences.sort(key=lambda x: -len(x))
             candidates = select_candidate_answers(sentences, use_keybert=use_keybert, top_k=300)
+            
+            # Enhanced answer filtering for better quality
             filtered = []
+            stopwords = {'lstm', 'rnn', '◦', 'etc', 'e.g', 'i.e', 'e.g.', 'i.e.', 'vs', 'vs.'}
+            
             for sent, ans in candidates:
-                if len(ans.split()) > 0 and len(ans) >= 3 and not ans.lower().strip() in {'lstm','rnn','◦'}:
-                    filtered.append((sent, ans))
-            candidates = filtered
+                ans_stripped = ans.strip()
+                ans_words = ans_stripped.split()
+                ans_lower = ans_stripped.lower()
+                
+                # Enhanced filtering criteria
+                is_valid = (
+                    len(ans_words) >= 2 and len(ans_words) <= 10 and  # Not too short or long
+                    len(ans_stripped) >= 5 and len(ans_stripped) <= 100 and  # Character limits
+                    ans_lower not in stopwords and  # Not a stopword
+                    not ans_stripped.startswith(('•', '-', '◦', '*', '(', '[')) and  # No bullet points
+                    not ans_stripped.endswith((':', ',', ';')) and  # No trailing punctuation
+                    ans_stripped[0].isupper() and  # Starts with capital
+                    any(c.isalpha() for c in ans_stripped) and  # Contains letters
+                    not ans_stripped.isnumeric() and  # Not just a number
+                    sum(c.isdigit() for c in ans_stripped) / len(ans_stripped) < 0.5  # Not mostly digits
+                )
+                
+                if is_valid:
+                    filtered.append((sent, ans_stripped))
+            
+            # Get more candidates to ensure quality after filtering
+            candidates = filtered[:num_questions * 3]
 
 
         if not candidates:
-            st.warning("No candidate answers found in the document. Try a different document or enable KeyBERT keyword extraction.")
+            st.warning("⚠️ No candidate answers found. Try a different document or enable KeyBERT keyword extraction.")
         else:
-            with st.spinner("Generating questions..."):
+            with st.spinner("🤖 Generating questions using AI..."):
                 try:
                     models = load_models(model_size)
                 except Exception as e:
@@ -168,21 +309,13 @@ if uploaded_file:
                     if qg is not None: # Check if 'qg' was successfully created
                         try:
                             q_text = qg.generate_question(context=sent, answer=answer)
+                            # Apply post-processing to clean and validate the question
+                            q_text = clean_question(q_text, answer)
                         except Exception:
                             q_text = "" 
-                    q_text_lower = q_text.lower().strip()
-                    ans_lower = answer.lower().strip()
                     
-                    is_garbage = (
-                        not q_text 
-                        or len(q_text_lower) <= 5 
-                        or q_text_lower == "true" 
-                        or not re.search(r'[a-zA-Z]', q_text)
-                        or ans_lower in q_text_lower  # Answer is IN the question
-                        or (len(ans_lower.split()) > 1 and q_text_lower in ans_lower) # Question is IN the answer
-                    )
-
-                    if is_garbage:
+                    # If question is still invalid after cleaning, use fallback
+                    if not q_text or len(q_text) < 10:
                         q_text = fallback_cloze_question(sent, answer)
                         is_fallback = True 
 
@@ -216,61 +349,85 @@ if uploaded_file:
                         break
 
                 if not generated:
-                    st.error("No questions were generated. Try a different file or enable KeyBERT.")
+                    st.error("❌ No questions were generated. Try a different file or enable KeyBERT.")
                 else:
                     st.session_state.mcq_list = generated
+                    st.success(f"✅ Successfully generated {len(generated)} questions!")
 
 # Display MCQs
 if st.session_state.mcq_list:
-    st.markdown("---")
-    st.subheader("Attempt the MCQs")
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("## 📝 Your Generated MCQs")
+    st.markdown(f"*Answer the questions below. Total: {len(st.session_state.mcq_list)} questions*")
+    st.markdown("<br>", unsafe_allow_html=True)
 
     for i, mcq in enumerate(st.session_state.mcq_list):
         qid = f"mcq_{i}"
-        st.markdown(f"**Q{i+1}.** [{mcq['difficulty']}] {mcq['question']}")
         
-        choice = st.radio(label=f"Select answer for Q{i+1}", options=mcq["options"], key=qid, index=None)
+        # Difficulty badge HTML
+        difficulty = mcq['difficulty'].lower()
+        badge_class = f"difficulty-{difficulty}"
+        
+        st.markdown('<div class="mcq-card">', unsafe_allow_html=True)
+        st.markdown(f"""
+            <div style="margin-bottom: 1rem;">
+                <span style="font-size: 1.1rem; font-weight: 600; color: #f1f5f9;">Q{i+1}.</span>
+                <span class="difficulty-badge {badge_class}">{mcq['difficulty']}</span>
+            </div>
+            <div style="font-size: 1.05rem; color: #cbd5e1; margin-bottom: 1rem;">{mcq['question']}</div>
+        """, unsafe_allow_html=True)
+        
+        choice = st.radio(
+            label=f"Select your answer for Q{i+1}", 
+            options=mcq["options"], 
+            key=qid, 
+            index=None,
+            label_visibility="collapsed"
+        )
         
         try:
             st.session_state.mcq_submitted[qid] = mcq["options"].index(choice)
         except ValueError:
-            
             st.session_state.mcq_submitted[qid] = None
 
         selected_idx = st.session_state.mcq_submitted.get(qid, None)
         
         if selected_idx is not None:
             if selected_idx == mcq["correct_idx"]:
-                st.success("Correct answer")
+                st.success("✅ Correct! Well done!")
             else:
                 correct_text = mcq["options"][mcq["correct_idx"]]
-                st.error(f"Wrong answer, the correct answer is **{correct_text}**")
+                st.error(f"❌ Incorrect. The correct answer is: **{correct_text}**")
 
-        with st.expander("Show context sentence"):
-            st.write(mcq["context"])
+        with st.expander("💡 Show context"):
+            st.info(mcq["context"])
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        st.markdown("---")
-
-    cols = st.columns([1,1,2])
-    if cols[0].button("Regenerate questions"):
-        st.session_state.mcq_list = []
-        st.session_state.mcq_submitted = {}
-        st.rerun()
-
-    # Download CSV export
-    df_rows = []
-    for idx, m in enumerate(st.session_state.mcq_list):
-        df_rows.append({
-            "question_no": idx+1,
-            "question": m["question"],
-            "answer": m["answer"],
-            "options": "||".join(m["options"]),
-            "context": m["context"],
-            "difficulty": m["difficulty"]
-        })
-    csv_buf = io.StringIO()
-    pd.DataFrame(df_rows).to_csv(csv_buf, index=False)
-    st.download_button("Download questions as CSV", csv_buf.getvalue(), "questions.csv", "text/csv")
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        if st.button("🔄 Regenerate Questions"):
+            st.session_state.mcq_list = []
+            st.session_state.mcq_submitted = {}
+            st.rerun()
+    
+    with col2:
+        # Download CSV export
+        df_rows = []
+        for idx, m in enumerate(st.session_state.mcq_list):
+            df_rows.append({
+                "question_no": idx+1,
+                "question": m["question"],
+                "answer": m["answer"],
+                "options": "||".join(m["options"]),
+                "context": m["context"],
+                "difficulty": m["difficulty"]
+            })
+        csv_buf = io.StringIO()
+        pd.DataFrame(df_rows).to_csv(csv_buf, index=False)
+        st.download_button("📥 Download CSV", csv_buf.getvalue(), "mcq_questions.csv", "text/csv")
 
 else:
-    st.info("No questions to attempt yet. Upload a file and click 'Prepare & Generate' to create MCQs.")
+    st.info("👆 Upload a document above and click 'Generate MCQs' to get started!")

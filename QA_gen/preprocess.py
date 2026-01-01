@@ -18,13 +18,13 @@ nlp = create_nlp()
 def _clean_text(text: str) -> str:
     if not text:
         return ""
-    text = re.sub(r'\b(subject|instructor|department|references|figure|fig\.|slide)\b[:\-]?[^\n]*', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'[•◦▪\-\*]+', '. ', text)
-    text = re.sub(r'\bnbsp\b|\&nbsp;|\&#160;', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'[\u2022\u25CF\u25AA]+', ' ', text)
-    text = re.sub(r'\n\s*\n', '. ', text)
-    text = text.replace('\n', ' ')
-    text = re.sub(r'[.]{2,}', '. ', text)
+    text = re.sub(r'\b(subject|instructor|department|references|figure|fig\.|slide)\b[:\-]?[^\n]*', ' ', text, flags=re.IGNORECASE)  # Remove Metadata Lines
+    text = re.sub(r'[•◦▪\-\*]+', '. ', text)  # Normalize Bullets and Dashes
+    text = re.sub(r'\bnbsp\b|\&nbsp;|\&#160;', ' ', text, flags=re.IGNORECASE) # Replace HTML Non-breaking Spaces
+    text = re.sub(r'[\u2022\u25CF\u25AA]+', ' ', text) # Replace Unicode Bullets
+    text = re.sub(r'\n\s*\n', '. ', text) # Merge Double Newlines into Dots
+    text = text.replace('\n', ' ') # Flatten All Lines to One Line
+    text = re.sub(r'[.]{2,}', '. ', text) # Replace Multiple Dots & Spaces
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
 
@@ -42,13 +42,13 @@ def split_sentences(text: str) -> List[str]:
     cleaned_text = _clean_text(text)
     doc = nlp(cleaned_text)
     sents = []
-    for sent in doc.sents:
+    for sent in doc.sents:  
         s = sent.text.strip()
-        if len(s) < 20:
+        if len(s) < 20:  # Skip very short sentences
             continue
-        if not re.search(r'[a-zA-Z]', s):
+        if not re.search(r'[a-zA-Z]', s):  # Skip non-alphabetic text
             continue
-        if _is_example_sentence(s):
+        if _is_example_sentence(s): # Skip non-alphabetic text
             continue
         sents.append(s)
     return sents
